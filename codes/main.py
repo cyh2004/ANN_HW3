@@ -1,4 +1,3 @@
-from ast import arg
 import tqdm
 import torch
 import torch.nn as nn
@@ -9,14 +8,10 @@ import random
 import argparse
 import torch
 from torch import optim
-import torch.nn.functional as F
 from tokenizer import get_tokenizer
 import os
 from model_tfmr import TfmrLMHeadModel, TransposeLinear
-random.seed(1229)
-torch.manual_seed(1229)
-torch.cuda.manual_seed_all(1229)
-np.random.seed(1229)
+
 from configuration import ModelConfig
 
 parser = argparse.ArgumentParser()
@@ -45,20 +40,25 @@ parser.add_argument("--pretrain_dir", type=str, default="None",
     help="Pre-Training directory for loading pretrained model. Default: None")
 parser.add_argument("--maxlen", type=int, default=35,
     help="Maximum length for training/inference. Default: 35")    
-parser.add_argument("--decode_strategy", type=str, choices=["random", "top-p", "top-k"], default="random",
-    help="The strategy for decoding. Can be \"random\", \"top-p\" or \"top-k\". Default: random")
+parser.add_argument("--decode_strategy", type=str, choices=["random", "top-p"], default="random",
+    help="The strategy for decoding. Can be \"random\" or \"top-p\". Default: random")
 parser.add_argument("--temperature", type=float, default=1,
     help="The temperature for decoding. Default: 1")
 parser.add_argument("--top_p", type=float, default=1.0,
     help="The p for top-p sampling. Default: 1.0")    
-parser.add_argument("--top_k", type=int, default=40,
-    help="The k for top-k sampling. Default: 40")        
-args = parser.parse_args()
+
+
+def set_seed(seed):
+    random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
 
 
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 def _sentence_bleu(ele):
     return sentence_bleu(ele[0], ele[1], weights=ele[2], smoothing_function=SmoothingFunction().method1)
+
 
 def fast_evaluate(model, data, batch_size, PAD_ID, device):
     model.eval()
@@ -71,16 +71,16 @@ def fast_evaluate(model, data, batch_size, PAD_ID, device):
 
             # TODO START
             # Implement the Perplexity metric. Basically it should be the same as the loss function used for training the model.
-            tgt_ids = 
-            input_ids = 
+            tgt_ids = data[st:ed].to(device)
+            input_ids = data[st:ed].to(device)
             outputs = model(input_ids)
             lm_logits = outputs["logits"]
 
             loss = ce_loss_fct(lm_logits.view(-1, lm_logits.shape[-1]), tgt_ids.contiguous().view(-1))
             # HINT: We set the loss to 0 where [PAD] token is the label, except for the last token, where [PAD] token worked as the "eod of sentence" token.
-            loss_mask = 
+            loss_mask = (tgt_ids != PAD_ID).float()
             # size of loss: (batch_size,)
-            loss = 
+            loss = loss * loss_mask
             # TODO END
             all_loss.append(loss)
     loss = torch.mean(torch.cat(all_loss, dim=0), dim=0)
@@ -183,9 +183,10 @@ def get_init_weights_func(config):
     return init_weights
 
 
-if __name__ == "__main__":
-
+def main():
+    args = parser.parse_args()
     print(args)
+    set_seed(1229)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     if not os.path.exists(args.train_dir):
         os.mkdir(args.train_dir)
@@ -196,7 +197,7 @@ if __name__ == "__main__":
     print("Loading Data ...")
     data, data_remove_pad = load_data(path=args.data_dir, tokenizer=tokenizer, PAD_ID=PAD_ID, field_list=["train", "dev", "test"], maxlen=args.maxlen)
     if args.test is None:
-        if args.pretrain_dir is None:
+        if args.pretrain_dir == "None":
             print("Created model with fresh parameters.")
             with open(args.model_config) as fin:
                 model_config = json.load(fin)
@@ -208,6 +209,7 @@ if __name__ == "__main__":
             model, config = load_model(args.pretrain_dir)
         model.to(device)
         print(model)
+        model.train()
 
         optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=0)
         best_val_ppl = float("inf")
@@ -219,7 +221,6 @@ if __name__ == "__main__":
             losses = []
             while ed < len(data["train"]):
                 batch_num += 1
-                st_time = time.time()
                 st, ed = ed, (ed + args.batch_size) if (ed + args.batch_size < len(data["train"])) else len(data["train"])
                 batched_data = torch.tensor(data["train"][st:ed]).to(device)
 
@@ -230,7 +231,7 @@ if __name__ == "__main__":
                 losses.append(loss.tolist())
 
                 if (batch_num) % 10 == 0:
-                    print("Epoch {} Batch {}, train loss {}".format(epoch, batch_num, np.mean(losses[-100:])))
+                    print("Epoch {} Batch {}, train loss {}".format(epoch, batch_num, np.mean(losses[-10:])))
 
             train_loss = np.mean(losses)
 
@@ -251,17 +252,17 @@ if __name__ == "__main__":
                 print("  best epoch:                    " + str(best_epoch))
                 print("  best validation perplexity:    " + str(best_val_ppl))
             else:
-                print("Validation loss: {:.3f}, becomes larger. Stop training.".format(val_ppl))
+                print("Validation perplexity: {:.3f}, becomes larger. Stop training.".format(val_ppl))
                 break
 
     else:
-        model = load_model(args.train_dir, model_name=f"checkpoint_{args.test}.bin")
+        model, config = load_model(args.train_dir, model_name=f"checkpoint_{args.test}.bin")
         model.to(device)
         print(model)
         test_loss, test_ppl = fast_evaluate(model=model, data=data["test"], batch_size=args.batch_size, PAD_ID=PAD_ID, device=device)
         print("        test_set, perplexity {:.2f}".format(test_ppl))
         result = model.inference(device=device, PAD_ID=PAD_ID, 
-            batch_size=args.batch_size, maxlen=args.maxlen, decode_strategy=args.decode_strategy, temperature=args.temperature, top_p=args.top_p, top_k=args.top_k)
+            batch_size=args.batch_size, maxlen=args.maxlen, decode_strategy=args.decode_strategy, temperature=args.temperature, top_p=args.top_p)
         with open(f"output_{args.decode_strategy}.txt", "w") as fout:
             for k, output in enumerate(result):
                 out = tokenizer.decode(output)
@@ -270,3 +271,7 @@ if __name__ == "__main__":
         eval_result = evaluate(gen_ids=result, truth_ids=data_remove_pad["test"])
         print("        test_set, forward BLEU-4 {:.3f}, backward BLEU-4 {:.3f}, harmonic BLEU-4 {:.3f}".format(eval_result["fw-bleu-4"], eval_result["bw-bleu-4"], eval_result["fw-bw-bleu-4"]))
         print(f"        test_set, write inference results to output_{args.decode_strategy}.txt")
+
+
+if __name__ == "__main__":
+    main()
