@@ -66,7 +66,7 @@ class TfmrAttention(nn.Module):
 
         self.pruned_heads = set()
 
-    def _attn(self, query, key, value):
+    def _attn(self, query, key, value, past_len):
         # TODO START
         # Input Size: (batch_size, num_heads, seq_len, attn_head_size)
         # implement the multi-head mask self-attnetion mechanism  
@@ -83,7 +83,6 @@ class TfmrAttention(nn.Module):
         # valid_len = torch.arange(1, num_steps + 1).repeat((batch_size, num_heads, 1))
         valid_len = self.bias[:, :attn_weights.shape[-2]]
         causal_mask = valid_len.unsqueeze(0) < valid_len.unsqueeze(-1)
-        # print(causal_mask.shape, attn_weights.shape)
         attn_weights = torch.where(causal_mask, attn_weights, self.masked_bias.to(attn_weights.dtype))
         attn_weights = torch.nn.functional.softmax(attn_weights)
         attn_weights = self.attn_dropout(attn_weights)
@@ -131,8 +130,11 @@ class TfmrAttention(nn.Module):
         value = self._split_heads(self.wv(value), self.num_heads, self.head_dim)
         if layer_past is not None:
             past_key, past_value = layer_past
+            past_len = past_key.size(-2)
             key = torch.cat((past_key, key), dim=-2)
             value = torch.cat((past_value, value), dim=-2)
+        else:
+            past_len = 0
 
         if use_cache is True:
             present = (key, value)
@@ -140,7 +142,7 @@ class TfmrAttention(nn.Module):
             present = None
         
         # Size: (batch_size, num_heads, query_len, value_len)
-        attn_output, attn_weights = self._attn(query, key, value)
+        attn_output, attn_weights = self._attn(query, key, value, past_len)
         
         # Size: (batch_size, query_len, value_len)
         attn_output = self._merge_heads(attn_output, self.num_heads, self.head_dim)
@@ -372,7 +374,16 @@ class TfmrLMHeadModel(nn.Module):
                 for _ in range(maxlen):
                     outputs = self(input_ids, past_key_values=past_key_values, use_cache=True)
                     logits = outputs["logits"]
-                    # 包含了每一次过Model，所有transformer block的key value
+                    # 包含了3个block
+                    # 每个block有key和value
+                    # 每次key的倒数第二个维度，也就是num_steps，都会加一
+                    # 变化过程大概是：
+                    # len(past_key_values) == 3
+                    # len(past_key_values[0]) == 2
+                    # past_key_values[0][0].shape:
+                    # torch.Size([32, 12, 1, 64])
+                    # torch.Size([32, 12, 2, 64])
+                    # torch.Size([32, 12, 3, 64])
                     past_key_values = outputs["past_key_values"]
                     logits = logits[:, -1, :] / temperature
 

@@ -14,6 +14,8 @@ from model_tfmr import TfmrLMHeadModel, TransposeLinear
 
 from configuration import ModelConfig
 
+import wandb
+
 parser = argparse.ArgumentParser()
 
 parser.add_argument("--name", type=str, default="run",
@@ -45,7 +47,9 @@ parser.add_argument("--decode_strategy", type=str, choices=["random", "top-p", "
 parser.add_argument("--temperature", type=float, default=1,
     help="The temperature for decoding. Default: 1")
 parser.add_argument("--top_p", type=float, default=1.0,
-    help="The p for top-p sampling. Default: 1.0")    
+    help="The p for top-p sampling. Default: 1.0")  
+parser.add_argument("--wandb", action="store_true",
+    help="Use wandb to log training process. Default: False") 
 
 
 def set_seed(seed):
@@ -185,6 +189,9 @@ def get_init_weights_func(config):
 def main():
     args = parser.parse_args()
     print(args)
+    if args.wandb:
+        wandb.init(project="ann_hw3", name=args.name)
+    
     set_seed(1229)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     if not os.path.exists(args.train_dir):
@@ -225,6 +232,10 @@ def main():
 
                 optimizer.zero_grad()
                 loss = model(input_ids=batched_data, labels=batched_data, PAD_ID=PAD_ID)["loss"]
+                
+                if args.wandb:
+                    wandb.log({"loss_step": loss.cpu().data.numpy()})
+                
                 loss.backward()
                 optimizer.step()
                 losses.append(loss.tolist())
@@ -250,6 +261,16 @@ def main():
                 print("  validation perplexity:         " + str(val_ppl))
                 print("  best epoch:                    " + str(best_epoch))
                 print("  best validation perplexity:    " + str(best_val_ppl))
+            
+                if args.wandb:
+                    wandb.log({
+                        "epoch": epoch,
+                        "train_loss_epoch": train_loss,
+                        "val_loss_epoch": val_loss,
+                        "val_ppl_epoch": val_ppl,
+                        "best_val_ppl_epoch": best_val_ppl,
+                    })
+                
             else:
                 print("Validation perplexity: {:.3f}, becomes larger. Stop training.".format(val_ppl))
                 break
