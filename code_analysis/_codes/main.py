@@ -1,4 +1,3 @@
-from ast import arg
 import tqdm
 import torch
 import torch.nn as nn
@@ -9,55 +8,57 @@ import random
 import argparse
 import torch
 from torch import optim
-import torch.nn.functional as F
 from tokenizer import get_tokenizer
 import os
 from model_tfmr import TfmrLMHeadModel, TransposeLinear
-random.seed(1229)
-torch.manual_seed(1229)
-torch.cuda.manual_seed_all(1229)
-np.random.seed(1229)
+
 from configuration import ModelConfig
 
 parser = argparse.ArgumentParser()
 
-parser.add_argument('--name', type=str, default="run",
-    help='Experiment name. Default: run')
-parser.add_argument('--model_config', type=str, default="./config.json",
-    help='Path to the configuration file. Default: ./config.json')    
-parser.add_argument('--tokenizer_dir', type=str, default="./tokenizer",
-    help='Tokenizer file directory. Default: ./tokenizer')    
-parser.add_argument('--num_epochs', type=int, default=20,
-    help='Number of training epoch. Default: 20')
-parser.add_argument('--cpu_count', type=int, default=20,
-    help='Number of CPU cores for evaluation. Default: 20')    
-parser.add_argument('--batch_size', type=int, default=32,
-    help='The number of batch_size. Default: 32')
-parser.add_argument('--learning_rate', type=float, default=1e-4,
-    help='Learning rate during optimization. Default: 1e-4')
-parser.add_argument('--test', type=str, default=None,
-    help='Evaluate the model with the specified name. Default: None')
-parser.add_argument('--data_dir', type=str, default='./data',
-    help='Data directory. Default: ../data')
-parser.add_argument('--train_dir', type=str, default='./train_test',
-    help='Training directory for saving model. Default: ./train')
-parser.add_argument('--pretrain_dir', type=str, default='None',
-    help='Pre-Training directory for loading pretrained model. Default: None')
-parser.add_argument('--maxlen', type=int, default=35,
-    help='Maximum length for training/inference. Default: 35')    
-parser.add_argument('--decode_strategy', type=str, choices=["random", "top-p", "top-k"], default="random",
-    help='The strategy for decoding. Can be "random", "top-p" or "top-k". Default: random')
-parser.add_argument('--temperature', type=float, default=1,
-    help='The temperature for decoding. Default: 1')
-parser.add_argument('--top_p', type=float, default=1.0,
-    help='The p for top-p sampling. Default: 1.0')    
-parser.add_argument('--top_k', type=int, default=40,
-    help='The k for top-k sampling. Default: 40')        
-args = parser.parse_args()
+parser.add_argument("--name", type=str, default="run",
+    help="Experiment name. Default: run")
+parser.add_argument("--model_config", type=str, default="./config.json",
+    help="Path to the configuration file. Default: ./config.json")    
+parser.add_argument("--tokenizer_dir", type=str, default="./tokenizer",
+    help="Tokenizer file directory. Default: ./tokenizer")    
+parser.add_argument("--num_epochs", type=int, default=20,
+    help="Number of training epoch. Default: 20")
+parser.add_argument("--cpu_count", type=int, default=20,
+    help="Number of CPU cores for evaluation. Default: 20")    
+parser.add_argument("--batch_size", type=int, default=32,
+    help="The number of batch_size. Default: 32")
+parser.add_argument("--learning_rate", type=float, default=1e-4,
+    help="Learning rate during optimization. Default: 1e-4")
+parser.add_argument("--test", type=str, default=None,
+    help="Evaluate the model with the specified name. Default: None")
+parser.add_argument("--data_dir", type=str, default="./data",
+    help="Data directory. Default: ../data")
+parser.add_argument("--train_dir", type=str, default="./train_test",
+    help="Training directory for saving model. Default: ./train")
+parser.add_argument("--pretrain_dir", type=str, default="None",
+    help="Pre-Training directory for loading pretrained model. Default: None")
+parser.add_argument("--maxlen", type=int, default=35,
+    help="Maximum length for training/inference. Default: 35")    
+parser.add_argument("--decode_strategy", type=str, choices=["random", "top-p"], default="random",
+    help="The strategy for decoding. Can be \"random\" or \"top-p\". Default: random")
+parser.add_argument("--temperature", type=float, default=1,
+    help="The temperature for decoding. Default: 1")
+parser.add_argument("--top_p", type=float, default=1.0,
+    help="The p for top-p sampling. Default: 1.0")    
+
+
+def set_seed(seed):
+    random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+
 
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 def _sentence_bleu(ele):
     return sentence_bleu(ele[0], ele[1], weights=ele[2], smoothing_function=SmoothingFunction().method1)
+
 
 def fast_evaluate(model, data, batch_size, PAD_ID, device):
     model.eval()
@@ -76,14 +77,17 @@ def fast_evaluate(model, data, batch_size, PAD_ID, device):
             lm_logits = outputs["logits"]
 
             loss = ce_loss_fct(lm_logits.view(-1, lm_logits.shape[-1]), tgt_ids.contiguous().view(-1))
+            # HINT: We set the loss to 0 where [PAD] token is the label, except for the last token, where [PAD] token worked as the "eod of sentence" token.
             loss_mask = 
+            # size of loss: (batch_size,)
             loss = 
             # TODO END
-            all_loss += loss.cpu().numpy().tolist()
-    loss = np.mean(all_loss)
-    ppl = np.exp(loss)
+            all_loss.append(loss)
+    loss = torch.mean(torch.cat(all_loss, dim=0), dim=0)
+    ppl = torch.exp(loss).item()
     model.train()
     return loss, ppl
+
 
 def evaluate(gen_ids, truth_ids, cpu_count=20):
     from multiprocessing import Pool
@@ -92,7 +96,7 @@ def evaluate(gen_ids, truth_ids, cpu_count=20):
     sample_hyps_num = len(gen_ids)
     res = {}
     for ngrams in [4]:
-        print("computing BLEU-%d"%ngrams)
+        print(f"computing BLEU-{ngrams}")
         bleu_irl_fw, bleu_irl_bw = [], []
         weights = np.ones(ngrams) / ngrams
 
@@ -121,17 +125,18 @@ def evaluate(gen_ids, truth_ids, cpu_count=20):
         else:
             fw_bw_bleu = 0
 
-        res.update({"fw-bleu-%d"%ngrams : fw_bleu, \
-            "bw-bleu-%d"%ngrams : bw_bleu, \
-            "fw-bw-bleu-%d"%ngrams : fw_bw_bleu \
+        res.update({f"fw-bleu-{ngrams}" : fw_bleu, \
+            f"bw-bleu-{ngrams}" : bw_bleu, \
+            f"fw-bw-bleu-{ngrams}" : fw_bw_bleu \
         })
     return res
+
 
 def load_data(path, tokenizer, PAD_ID, field_list=["train", "dev", "test"], maxlen=40):
     data, data_remove_pad = {}, {}
     for name in field_list:
         data[name], data_remove_pad[name] = [], []
-        with open("%s/%s.txt"%(path, name)) as fin:
+        with open(f"{path}/{name}.txt") as fin:
             for line in fin:
                 tokens = tokenizer.encode(line.strip())
                 if len(tokens) < maxlen:
@@ -140,6 +145,26 @@ def load_data(path, tokenizer, PAD_ID, field_list=["train", "dev", "test"], maxl
                     data[name].append([PAD_ID] + tokens[:maxlen])
                 data_remove_pad[name].append(tokens)
     return data, data_remove_pad
+
+
+def load_model(pretrained_dir, model_name="pretrained_ckpt.bin"):
+    model_path = os.path.join(pretrained_dir, model_name)
+
+    if os.path.exists(model_path):
+        print(f"Loading model from {model_path}")
+        config_path = os.path.join(pretrained_dir, "config.json")
+        assert os.path.exists(config_path), f"config.json must exist in {pretrained_dir}"
+        print(f"[WARNING] Overiding args.model_config with {config_path}")
+        with open(config_path) as f:
+            model_config = json.load(f)
+            model_config = ModelConfig(**model_config)
+        model = TfmrLMHeadModel(model_config)
+        model.load_state_dict(torch.load(model_path))
+    else:
+        raise RuntimeError(f"No such checkpoint: {model_path}")
+    
+    return model, model_config
+
 
 def get_init_weights_func(config):
     def init_weights(module):
@@ -157,14 +182,16 @@ def get_init_weights_func(config):
             module.weight.data.fill_(1.0)
     return init_weights
 
-if __name__ == '__main__':
 
+def main():
+    args = parser.parse_args()
     print(args)
-    device = "cuda:6" #torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    set_seed(1229)
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     if not os.path.exists(args.train_dir):
         os.mkdir(args.train_dir)
     tokenizer = get_tokenizer(args.tokenizer_dir)
-    PAD_ID = tokenizer.encoder['<|endoftext|>']
+    PAD_ID = tokenizer.encoder["<|endoftext|>"]
     print("Tokenizer PAD ID:", PAD_ID)
 
     print("Loading Data ...")
@@ -179,17 +206,10 @@ if __name__ == '__main__':
             init_weights_func = get_init_weights_func(config=config)
             model.apply(init_weights_func)
         else:
-            model_path = os.path.join(args.pretrain_dir, 'pretrained_ckpt.tar')
-            if os.path.exists(model_path):
-                print("Loading model from %s" % model_path)
-                model = torch.load(model_path)
-            else:
-                raise RuntimeError("No such checkpoint: %s"%model_path)
+            model, config = load_model(args.pretrain_dir)
         model.to(device)
         print(model)
-
-
-
+        model.train()
 
         optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=0)
         best_val_ppl = float("inf")
@@ -201,7 +221,6 @@ if __name__ == '__main__':
             losses = []
             while ed < len(data["train"]):
                 batch_num += 1
-                st_time = time.time()
                 st, ed = ed, (ed + args.batch_size) if (ed + args.batch_size < len(data["train"])) else len(data["train"])
                 batched_data = torch.tensor(data["train"][st:ed]).to(device)
 
@@ -212,7 +231,7 @@ if __name__ == '__main__':
                 losses.append(loss.tolist())
 
                 if (batch_num) % 10 == 0:
-                    print("Epoch %d Batch %d, train loss %f" % (epoch, batch_num, np.mean(losses[-100:])))
+                    print("Epoch {} Batch {}, train loss {}".format(epoch, batch_num, np.mean(losses[-10:])))
 
             train_loss = np.mean(losses)
 
@@ -221,8 +240,9 @@ if __name__ == '__main__':
                 best_val_ppl = val_ppl
                 best_epoch = epoch
 
-                with open(os.path.join(args.train_dir, 'checkpoint_%s.pth.tar' % args.name), 'wb') as fout:
-                    torch.save(model, fout)
+                torch.save(model.state_dict(), os.path.join(args.train_dir, f"checkpoint_{args.name}.bin"))
+                with open(os.path.join(args.train_dir, "config.json"), "w") as f:
+                    json.dump(config.__dict__, f)
 
                 epoch_time = time.time() - start_time
                 print("Epoch " + str(epoch) + " of " + str(args.num_epochs) + " took " + str(epoch_time) + "s")
@@ -232,27 +252,26 @@ if __name__ == '__main__':
                 print("  best epoch:                    " + str(best_epoch))
                 print("  best validation perplexity:    " + str(best_val_ppl))
             else:
-                print("Validation loss: %.3f, becomes larger. Stop training."%val_ppl)
+                print("Validation perplexity: {:.3f}, becomes larger. Stop training.".format(val_ppl))
                 break
 
     else:
-        model_path = os.path.join(args.train_dir, 'checkpoint_%s.pth.tar' % args.test)
-        if os.path.exists(model_path):
-            print("Loading model from %s" % model_path)
-            model = torch.load(model_path)
-        else:
-            raise RuntimeError("No such checkpoint")
+        model, config = load_model(args.train_dir, model_name=f"checkpoint_{args.test}.bin")
         model.to(device)
         print(model)
         test_loss, test_ppl = fast_evaluate(model=model, data=data["test"], batch_size=args.batch_size, PAD_ID=PAD_ID, device=device)
-        print("        test_set, perplexity %.2f" % (test_ppl))
+        print("        test_set, perplexity {:.2f}".format(test_ppl))
         result = model.inference(device=device, PAD_ID=PAD_ID, 
-            batch_size=args.batch_size, maxlen=args.maxlen, decode_strategy=args.decode_strategy, temperature=args.temperature, top_p=args.top_p, top_k=args.top_k)
-        with open('output_%s.txt'%args.decode_strategy, 'w') as fout:
+            batch_size=args.batch_size, maxlen=args.maxlen, decode_strategy=args.decode_strategy, temperature=args.temperature, top_p=args.top_p)
+        with open(f"output_{args.decode_strategy}.txt", "w") as fout:
             for k, output in enumerate(result):
                 out = tokenizer.decode(output)
                 print(k, out)
                 fout.write(out + "\n")
         eval_result = evaluate(gen_ids=result, truth_ids=data_remove_pad["test"])
-        print("        test_set, forward BLEU-4 %.3f, backward BLEU-4 %.3f, harmonic BLEU-4 %.3f" % (eval_result["fw-bleu-4"], eval_result["bw-bleu-4"], eval_result["fw-bw-bleu-4"]))
-        print("        test_set, write inference results to output_%s.txt"%args.decode_strategy)
+        print("        test_set, forward BLEU-4 {:.3f}, backward BLEU-4 {:.3f}, harmonic BLEU-4 {:.3f}".format(eval_result["fw-bleu-4"], eval_result["bw-bleu-4"], eval_result["fw-bw-bleu-4"]))
+        print(f"        test_set, write inference results to output_{args.decode_strategy}.txt")
+
+
+if __name__ == "__main__":
+    main()

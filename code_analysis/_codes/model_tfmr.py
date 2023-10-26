@@ -79,11 +79,15 @@ class TfmrAttention(nn.Module):
     def _split_heads(self, tensor, num_heads, attn_head_size):
         # TODO START
         # Splits hidden_size dim into attn_head_size and num_heads
+        # Input Size: (batch_size, sequence_length, hidden_size)
+        # Output Size: (batch_size, num_attn_heads, sequence_length, attn_head_size)
         # TODO END
 
     def _merge_heads(self, tensor, num_heads, attn_head_size):
         # TODO START
         # Merges attn_head_size dim and num_attn_heads dim into hidden_size
+        # Input Size: (batch_size, num_attn_heads, sequence_length, attn_head_size)
+        # Output Size: (batch_size, sequence_length, hidden_size)
         # TODO END
 
     def forward(
@@ -164,7 +168,9 @@ class TfmrBlock(nn.Module):
         outputs = attn_outputs[1:]
 
         # TODO START
-        # Bulid connecetions of different modules in the Tranformer block
+        # Implement the rest of the Tranformer block (residual connection, layer norm, feedforward)
+        # NOTE: We implement the Pre-Norm version of Transformer, where the ln_1 and ln_2 are place at the residual branch
+        # HINT: You can refer to Page 38 in lecture 8 for more details
         hidden_states = 
         # TODO END
 
@@ -203,6 +209,13 @@ class TfmrModel(nn.Module):
         device = input_ids.device if input_ids is not None else inputs_embeds.device
 
         inputs_embeds = self.wte(input_ids)
+
+        if past_key_values is None:
+            past_length = 0
+            past_key_values = tuple([None] * len(self.h))
+        else:
+            past_length = past_key_values[0][0].size(-2)
+
         # TODO START
         # Implement the positional embeddings. Note that the length of cache hidden states used during inference
         position_embeds = 
@@ -273,6 +286,7 @@ class TfmrLMHeadModel(nn.Module):
             ce_loss_fct = CrossEntropyLoss(reduction="none")
             # TODO START
             # Implement the loss function. Note that you should shift logits so that tokens < n predict n
+            # HINT: We set the loss to 0 where [PAD] token is the label, except for the last token, where [PAD] token worked as the "eod of sentence" token.
             # TODO END
 
         return {
@@ -285,7 +299,7 @@ class TfmrLMHeadModel(nn.Module):
          }
         
 
-    def inference(self, device, PAD_ID, batch_size, maxlen, decode_strategy, temperature, top_p=1.0, top_k=50267):
+    def inference(self, device, PAD_ID, batch_size, maxlen, decode_strategy, temperature, top_p=1.0):
         self.eval()
         allgen = []
         with torch.no_grad():
@@ -302,10 +316,6 @@ class TfmrLMHeadModel(nn.Module):
                     if decode_strategy == "top-p":
                         # TODO START
                         # implement top-p sampling
-                        # TODO END
-                    elif decode_strategy == "top-k":
-                        # TODO START
-                        # implement top-k sampling
                         # TODO END
                     prob = logits.softmax(dim=-1) # shape: (batch_size, num_vocabs)
                     now_token = torch.multinomial(prob, 1)[:, :1] # shape: (batch_size)
