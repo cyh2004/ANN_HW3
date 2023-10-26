@@ -79,10 +79,11 @@ class TfmrAttention(nn.Module):
         if self.scale_attn_weights:
             attn_weights = attn_weights / (float(value.size(-1)) ** 0.5)
 
-        # Size: (batch_size, num_heads, num_steps)
+        # Size: (batch_size*num_heads, num_steps)
         # valid_len = torch.arange(1, num_steps + 1).repeat((batch_size, num_heads, 1))
-        valid_len = self.bias[:, :attn_weights.shape[-1]]
+        valid_len = self.bias[:, :attn_weights.shape[-2]]
         causal_mask = valid_len.unsqueeze(0) < valid_len.unsqueeze(-1)
+        # print(causal_mask.shape, attn_weights.shape)
         attn_weights = torch.where(causal_mask, attn_weights, self.masked_bias.to(attn_weights.dtype))
         attn_weights = torch.nn.functional.softmax(attn_weights)
         attn_weights = self.attn_dropout(attn_weights)
@@ -128,7 +129,6 @@ class TfmrAttention(nn.Module):
         query = self._split_heads(self.wq(query), self.num_heads, self.head_dim)
         key = self._split_heads(self.wk(key), self.num_heads, self.head_dim)
         value = self._split_heads(self.wv(value), self.num_heads, self.head_dim)
-
         if layer_past is not None:
             past_key, past_value = layer_past
             key = torch.cat((past_key, key), dim=-2)
@@ -196,6 +196,7 @@ class TfmrBlock(nn.Module):
         )
         # Size: (batch_size, num_hiddens, embed_size)
         attn_output = attn_outputs[0]  # output_attn: a, present, (attentions)
+        # 经过一次attn就加一个present
         outputs = attn_outputs[1:] # present, attn_weights
 
         # TODO START
@@ -371,6 +372,7 @@ class TfmrLMHeadModel(nn.Module):
                 for _ in range(maxlen):
                     outputs = self(input_ids, past_key_values=past_key_values, use_cache=True)
                     logits = outputs["logits"]
+                    # 包含了每一次过Model，所有transformer block的key value
                     past_key_values = outputs["past_key_values"]
                     logits = logits[:, -1, :] / temperature
 
@@ -380,6 +382,13 @@ class TfmrLMHeadModel(nn.Module):
                         logits = logits.softmax(dim=-1)
                         cumsum = logits.cumsum(dim=-1)
                         logits = torch.where(cumsum < top_p, logits, torch.full_like(logits, -1e4))
+                        # TODO END
+                    elif decode_strategy == "top_k":
+                        # TODO START
+                        # implement top-k sampling
+                        logits = logits.softmax(dim=-1)
+                        values, indices = logits.topk(10)
+                        logits = torch.where(logits > values[:, -1:], logits, torch.full_like(logits, -1e4))
                         # TODO END
                     prob = logits.softmax(dim=-1) # shape: (batch_size, num_vocabs)
                     now_token = torch.multinomial(prob, 1)[:, :1] # shape: (batch_size)

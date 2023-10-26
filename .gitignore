@@ -1,1 +1,4 @@
 **/train_test/**
+**/pretrain/**
+output_*
+**/__pycache__/**
