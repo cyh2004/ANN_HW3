@@ -39,7 +39,11 @@ class TfmrAttention(nn.Module):
             "bias",
             # TODO START
             # define the bias term for constructing the causal mask (i.e., seeing only prefix tokens).
-            torch.arange(1, max_positions + 1).reshape((1, -1))
+            torch.arange(1, max_positions + 1).reshape((1, 1, 1, -1)) <= torch.arange(1, max_positions + 1).reshape((1, 1, -1, 1))
+            # torch.tril(torch.ones((max_positions, max_positions), dtype=torch.bool)).view(
+            #     1, 1, max_positions, max_positions
+            # ),
+            # persistent=False,
             # TODO END
         )
         self.register_buffer("masked_bias", torch.tensor(-1e4))
@@ -57,39 +61,31 @@ class TfmrAttention(nn.Module):
         self.c_attn = TransposeLinear(3 * self.embed_dim, self.embed_dim)
         self.c_proj = TransposeLinear(self.embed_dim, self.embed_dim)
 
-        self.wq = TransposeLinear(self.embed_dim, self.embed_dim)
-        self.wk = TransposeLinear(self.embed_dim, self.embed_dim)
-        self.wv = TransposeLinear(self.embed_dim, self.embed_dim)
-
         self.attn_dropout = nn.Dropout(config.attn_pdrop)
         self.resid_dropout = nn.Dropout(config.resid_pdrop)
 
         self.pruned_heads = set()
 
-    def _attn(self, query, key, value, past_len):
+    def _attn(self, query, key, value):
         # TODO START
         # Input Size: (batch_size, num_heads, seq_len, attn_head_size)
         # implement the multi-head mask self-attnetion mechanism  
         
         # 注意这里需要交换key的倒数第一和第二个维度
-        shape = query.shape[:2]
         # Size: (batch_size*num_heads, query_len, key_len)
-        attn_weights = torch.bmm(query.reshape(-1, query.shape[-2], query.shape[-1]), key.reshape(-1, key.shape[-2], key.shape[-1]).transpose(-2,-1))
+        attn_weights = torch.matmul(query, key.transpose(-2,-1))
 
         if self.scale_attn_weights:
             attn_weights = attn_weights / (float(value.size(-1)) ** 0.5)
 
         # Size: (batch_size*num_heads, num_steps)
-        # valid_len = torch.arange(1, num_steps + 1).repeat((batch_size, num_heads, 1))
-        valid_len = self.bias[:, :attn_weights.shape[-2]]
-        causal_mask = valid_len.unsqueeze(0) < valid_len.unsqueeze(-1)
+        
+        causal_mask = self.bias[:, :, (key.shape[-2] - query.shape[-2]):key.shape[-2], :key.shape[-2]]
         attn_weights = torch.where(causal_mask, attn_weights, self.masked_bias.to(attn_weights.dtype))
-        attn_weights = torch.nn.functional.softmax(attn_weights)
+        attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1)
         attn_weights = self.attn_dropout(attn_weights)
         # Size: (batch_size*num_heads, query_len, key_len)
-        attn_output = torch.bmm(attn_weights, value.reshape(-1, value.shape[-2], value.shape[-1]))
-        attn_output = attn_output.reshape(*shape, attn_output.shape[-2], attn_output.shape[-1])
-        attn_weights = attn_weights.reshape(*shape, attn_weights.shape[-2], attn_weights.shape[-1])
+        attn_output = torch.matmul(attn_weights, value)
         # Size: (batch_size, num_heads, query_len, value_len)
         return attn_output, attn_weights
         # TODO END
@@ -125,16 +121,13 @@ class TfmrAttention(nn.Module):
         # hidden_states 从 (batch_size, sequence_length, hidden_size) 变成 (batch_size, sequence_length, 3 * hidden_size)
         # 然后被split成 (batch_size, sequence_length, hidden_size)
         query, key, value = self.c_attn(hidden_states).split(self.split_size, dim=2)
-        query = self._split_heads(self.wq(query), self.num_heads, self.head_dim)
-        key = self._split_heads(self.wk(key), self.num_heads, self.head_dim)
-        value = self._split_heads(self.wv(value), self.num_heads, self.head_dim)
+        query = self._split_heads(query, self.num_heads, self.head_dim)
+        key = self._split_heads(key, self.num_heads, self.head_dim)
+        value = self._split_heads(value, self.num_heads, self.head_dim)
         if layer_past is not None:
             past_key, past_value = layer_past
-            past_len = past_key.size(-2)
             key = torch.cat((past_key, key), dim=-2)
             value = torch.cat((past_value, value), dim=-2)
-        else:
-            past_len = 0
 
         if use_cache is True:
             present = (key, value)
@@ -142,7 +135,7 @@ class TfmrAttention(nn.Module):
             present = None
         
         # Size: (batch_size, num_heads, query_len, value_len)
-        attn_output, attn_weights = self._attn(query, key, value, past_len)
+        attn_output, attn_weights = self._attn(query, key, value)
         
         # Size: (batch_size, query_len, value_len)
         attn_output = self._merge_heads(attn_output, self.num_heads, self.head_dim)
@@ -207,9 +200,9 @@ class TfmrBlock(nn.Module):
         # HINT: You can refer to Page 39 in lecture 8 for more details
         hidden_states = residual + attn_output
         residual = hidden_states
-        hidden_states = self.ln_2(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = hidden_states + residual
+        ffn_hidden_states = self.ln_2(hidden_states)
+        ffn_hidden_states = self.mlp(ffn_hidden_states)
+        hidden_states = ffn_hidden_states + residual
         # TODO END
 
         if use_cache:
@@ -259,16 +252,11 @@ class TfmrModel(nn.Module):
             past_length = past_key_values[0][0].size(-2)
 
         # TODO START
+        # Reference: https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt2/modeling_gpt2.py
         # Implement the positional embeddings. Note that the length of cache hidden states used during inference
-        position_embeds = torch.zeros((1, inputs_embeds.shape[1], inputs_embeds.shape[2])).to(device)
-        i = torch.arange(0, inputs_embeds.shape[1], dtype=torch.float32).reshape((-1, 1)).to(device)
-        j = torch.arange(0, inputs_embeds.shape[2], 2, dtype=torch.float32) / inputs_embeds.shape[1]
-        j = j.to(device)
-        j = j.reshape((1, -1))
-        i = i / torch.pow(10000, j)
-        
-        position_embeds[:, :, 0::2] = torch.sin(i)
-        position_embeds[:, :, 1::2] = torch.cos(i)
+        position_ids = torch.arange(past_length, input_shape[-1] + past_length, dtype=torch.long, device=device)
+        position_ids = position_ids.unsqueeze(0)
+        position_embeds = self.wpe(position_ids)
         # TODO END
         hidden_states = inputs_embeds + position_embeds
 
@@ -335,22 +323,28 @@ class TfmrLMHeadModel(nn.Module):
         if labels is not None:
             ce_loss_fct = CrossEntropyLoss(reduction="none")
             # TODO START
+            
+            # Implement the loss function. Note that you should shift logits so that tokens < n predict n
+            # HINT: We set the loss to 0 where [PAD] token is the label, except for the last token, where [PAD] token worked as the "eod of sentence" token.
+            
             # def cross_entropy(y_hat, y):
             #   return - np.log(y_hat[range(len(y_hat)), y])
             # lm_logits: (batch_size, num_steps, vocab_size)
             # labels: (batch_size, num_steps)
-            valid_len = (labels == PAD_ID)
+            shift_logits = lm_logits[:, :-1, :]
+            shift_labels = labels[:, 1:]
+            
+            valid_len = torch.ones_like(labels, dtype=torch.float32)
+            valid_len[:, 1:] = (shift_labels != PAD_ID).float()
+            valid_len = valid_len[:, :-1]
             # valid_len[:, 0] = False
             # valid_len: (batch_size, num_steps)
-            valid_len = ~valid_len
+            
             # loss = torch.nn.functional.softmax(lm_logits, dim=-1)
             # loss: (batch_size, num_steps)
-            loss = ce_loss_fct(lm_logits.reshape(-1, lm_logits.shape[-1]), labels.reshape(-1))
-            loss = loss[valid_len.reshape(-1)].mean()
-            # loss = loss.mean()
-            
-            # Implement the loss function. Note that you should shift logits so that tokens < n predict n
-            # HINT: We set the loss to 0 where [PAD] token is the label, except for the last token, where [PAD] token worked as the "eod of sentence" token.
+            loss = ce_loss_fct(shift_logits.permute(0, 2, 1), shift_labels)
+            loss = (loss * valid_len).sum(dim=-1) / valid_len.sum(dim=-1)
+            loss = loss.mean()            
             # TODO END
 
         return {
@@ -390,17 +384,18 @@ class TfmrLMHeadModel(nn.Module):
                     if decode_strategy == "top-p":
                         # TODO START
                         # implement top-p sampling
-                        logits = logits.softmax(dim=-1)
-                        cumsum = logits.cumsum(dim=-1)
-                        logits = torch.where(cumsum < top_p, logits, torch.full_like(logits, -1e4))
+                        
+                        sorted, idx = torch.sort(logits, descending=True)
+                        sorted = sorted.softmax(dim=-1)
+                        cumsum = sorted.cumsum(dim=-1)
+                        mask = cumsum < top_p
+                        mask[:, 1:] = mask[:, :-1]
+                        mask[:, 0] = True
+                        sorted = torch.where(mask, sorted, torch.full_like(logits, -1e6))
+                        logits = torch.scatter(torch.full_like(logits, -1e6), dim=-1, index=idx, src=sorted)
+                        # print(logits[0])
                         # TODO END
-                    elif decode_strategy == "top_k":
-                        # TODO START
-                        # implement top-k sampling
-                        logits = logits.softmax(dim=-1)
-                        values, indices = logits.topk(10)
-                        logits = torch.where(logits > values[:, -1:], logits, torch.full_like(logits, -1e4))
-                        # TODO END
+                        
                     prob = logits.softmax(dim=-1) # shape: (batch_size, num_vocabs)
                     now_token = torch.multinomial(prob, 1)[:, :1] # shape: (batch_size)
 

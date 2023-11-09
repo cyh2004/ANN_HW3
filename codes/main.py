@@ -79,11 +79,23 @@ def fast_evaluate(model, data, batch_size, PAD_ID, device):
             # input_ids = data[st:ed].to(device)
             outputs = model(input_ids)
             lm_logits = outputs["logits"]
-            loss = ce_loss_fct(lm_logits.view(-1, lm_logits.shape[-1]), tgt_ids.contiguous().view(-1))
+            shift_logits = lm_logits[:, :-1, :]
+            shift_labels = tgt_ids[:, 1:]
+            
+            valid_len = torch.ones_like(tgt_ids, dtype=torch.float32)
+            valid_len[:, 1:] = (shift_labels != PAD_ID).float()
+            valid_len = valid_len[:, :-1]
+            # valid_len[:, 0] = False
+            # valid_len: (batch_size, num_steps)
+            
+            # loss = torch.nn.functional.softmax(lm_logits, dim=-1)
+            # loss: (batch_size, num_steps)
+            loss = ce_loss_fct(shift_logits.permute(0, 2, 1), shift_labels)
+            loss = (loss * valid_len).sum(dim=-1) / valid_len.sum(dim=-1)
             # HINT: We set the loss to 0 where [PAD] token is the label, except for the last token, where [PAD] token worked as the "eod of sentence" token.
-            loss_mask = (tgt_ids.contiguous().view(-1) != PAD_ID).float()
+            # loss_mask = (tgt_ids.contiguous().view(-1) != PAD_ID).float()
             # size of loss: (batch_size,)
-            loss = loss * loss_mask
+            # loss = loss * loss_mask
             # TODO END
             all_loss.append(loss)
     loss = torch.mean(torch.cat(all_loss, dim=0), dim=0)
@@ -160,9 +172,27 @@ def load_model(pretrained_dir, model_name="pretrained_ckpt.bin"):
         print(f"[WARNING] Overiding args.model_config with {config_path}")
         with open(config_path) as f:
             model_config = json.load(f)
+            if "layer4use" in model_config.keys():
+                layer4use = model_config["layer4use"]
+            else:
+                layer4use = None
             model_config = ModelConfig(**model_config)
         model = TfmrLMHeadModel(model_config)
-        model.load_state_dict(torch.load(model_path))
+        if layer4use is not None:
+            state_dict = torch.load(model_path)
+            state_dict_copy = state_dict.copy()
+            idx = 0
+            for i in range(12):
+                if i in layer4use:
+                    for key in state_dict.keys():
+                        if key.startswith(f"transformer.h.{i}"):
+                            newkey = key
+                            newkey = newkey.replace(f"transformer.h.{i}", f"transformer.h.{idx}")
+                            state_dict_copy[newkey] = state_dict[key]
+                    idx += 1
+            model.load_state_dict(state_dict_copy, strict=False)
+        else:
+            model.load_state_dict(torch.load(model_path))
     else:
         raise RuntimeError(f"No such checkpoint: {model_path}")
     
@@ -283,14 +313,14 @@ def main():
         print("        test_set, perplexity {:.2f}".format(test_ppl))
         result = model.inference(device=device, PAD_ID=PAD_ID, 
             batch_size=args.batch_size, maxlen=args.maxlen, decode_strategy=args.decode_strategy, temperature=args.temperature, top_p=args.top_p)
-        with open(f"output_{args.decode_strategy}.txt", "w") as fout:
+        with open(f"output_{args.test}_{args.temperature}_{args.decode_strategy}.txt", "w") as fout:
             for k, output in enumerate(result):
                 out = tokenizer.decode(output)
                 print(k, out)
                 fout.write(out + "\n")
         eval_result = evaluate(gen_ids=result, truth_ids=data_remove_pad["test"])
         print("        test_set, forward BLEU-4 {:.3f}, backward BLEU-4 {:.3f}, harmonic BLEU-4 {:.3f}".format(eval_result["fw-bleu-4"], eval_result["bw-bleu-4"], eval_result["fw-bw-bleu-4"]))
-        print(f"        test_set, write inference results to output_{args.decode_strategy}.txt")
+        print(f"        test_set, write inference results to output_{args.test}_{args.temperature}_{args.decode_strategy}.txt")
 
 
 if __name__ == "__main__":
